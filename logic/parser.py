@@ -1,74 +1,141 @@
+"""
+parser.py — Intérprete robusto de ecuaciones lineales
+======================================================
+Convierte una ecuación lineal escrita en texto libre a [a, b, c, d] como Fraction.
+Soporta todos los formatos de entrada comunes:
+
+  Formatos de coeficiente aceptados:
+    2x          coeficiente entero
+    -3x         coeficiente negativo
+    1/2 x       fracción separada
+    (1/2)x      fracción entre paréntesis
+    0.5x        decimal
+    x           coeficiente implícito 1
+    -x          coeficiente implícito -1
+    2*x         con asterisco multiplicador
+
+  Formatos de constante:
+    = 5         entero
+    = -3.5      decimal negativo
+    = 1/2       fracción
+    = 0         cero
+
+Entrada:  str  — ecuación como texto (ej: "(1/2)x + y - z = 8")
+Salida:   list[Fraction] — [coef_x, coef_y, coef_z, rhs]
+"""
 import re
 from fractions import Fraction
 from logic.calculator import parse_fraction
 
+
+def _preprocess(eq_str):
+    """
+    Normaliza la cadena antes del parseo principal:
+      1. Elimina todos los espacios.
+      2. Convierte a minúsculas.
+      3. Reemplaza (a/b) → a/b  (fracciones entre paréntesis).
+      4. Reemplaza * entre número y variable → vacío (2*x → 2x).
+      5. Convierte decimales como coeficientes (0.5x → fracción internamente aceptada).
+    """
+    s = "".join(eq_str.lower().split())
+
+    # (a/b) o (a) → quitar paréntesis cuando el contenido es numérico
+    # Ej: (1/2)x → 1/2 x,   (-3)x → -3x
+    s = re.sub(r'\(([+-]?[\d\.]+(?:/[\d\.]+)?)\)', r'\1', s)
+
+    # Eliminar asterisco multiplicador: 2*x → 2x
+    s = s.replace('*', '')
+
+    return s
+
+
 def parse_equation(eq_str):
     """
-    Parses a linear equation of 3 variables (x, y, z) into a list of 4 fractions [a, b, c, d].
-    Handles implicit coefficients (x -> 1x, -y -> -1y) and moves constants to the RHS.
+    Parsea una ecuación lineal de 3 variables (x, y, z).
+
+    Soporta:
+      - Coeficientes enteros, decimales, fracciones simples y entre paréntesis.
+      - Coeficiente implícito 1 o -1 (solo la variable).
+      - Constantes en el lado izquierdo (se mueven al lado derecho).
+      - Espacios libres y mezcla de formatos.
+
+    Args:
+        eq_str (str): Ecuación en texto. Debe contener '='.
+
+    Returns:
+        list[Fraction]: [coef_x, coef_y, coef_z, rhs]
+
+    Raises:
+        ValueError: Si el formato es irreconocible.
     """
-    # Normalize: remove all whitespace characters and lowercase
-    eq_str = "".join(eq_str.lower().split())
-    
     if "=" not in eq_str:
         raise ValueError("La ecuación debe contener el signo '='")
-    
-    left_side, right_side = eq_str.split("=", 1)
-    
-    # Parse RHS
+
+    # Separar antes de normalizar para no perder el '='
+    raw_left, raw_right = eq_str.split("=", 1)
+
+    # Normalizar cada lado por separado
+    left_side = _preprocess(raw_left)
+    right_side = _preprocess(raw_right)
+
+    # Parsear el RHS (término independiente)
     try:
-        # Ensure RHS is also stripped of any whitespace
-        rs_clean = right_side.strip()
-        rhs = parse_fraction(rs_clean) if rs_clean else Fraction(0)
-    except:
-        rhs = Fraction(0)
-        
+        rhs = parse_fraction(right_side) if right_side else Fraction(0)
+    except Exception:
+        raise ValueError(f"El lado derecho '{raw_right.strip()}' no es un número válido.")
+
+    # Diccionario de coeficientes
     coeffs = {'x': Fraction(0), 'y': Fraction(0), 'z': Fraction(0)}
-    
-    # Term pattern: optional sign, then either (number followed by optional var) OR (just a var)
-    # Group 1: Sign ([+-]?)
-    # Group 2: Coefficient ([\d\./]+)
-    # Group 3: Variable after coefficient ([xyz]?)
-    # Group 4: Variable without coefficient ([xyz])
-    pattern = re.compile(r'([+-]?)(?:([\d\./]+)([xyz]?)|([xyz]))')
-    
+
+    # Patrón ampliado:
+    #   Grupo 1: signo opcional  [+-]
+    #   Alternativa A: número (entero, decimal o fracción a/b) seguido de variable opcional
+    #   Alternativa B: variable sola (coeficiente implícito 1)
+    #
+    # Número: dígitos con punto decimal y/o barra de fracción
+    NUM = r'[\d]+(?:\.[\d]+)?(?:/[\d]+(?:\.[\d]+)?)?'
+    pattern = re.compile(
+        rf'([+-]?)(?:({NUM})([xyz]?)|([xyz]))'
+    )
+
     pos = 0
     while pos < len(left_side):
         match = pattern.match(left_side, pos)
         if not match:
-            # Show the actual char that failed for debugging
-            char_info = f"'{left_side[pos]}'"
-            raise ValueError(f"No se pudo interpretar el carácter {char_info} en la posición {pos} de '{left_side}'")
-            
-        full_term = match.group(0)
-        sign = match.group(1)
-        num_str = match.group(2)
-        var_after_num = match.group(3)
-        var_standalone = match.group(4)
-        
-        # Determine numeric value and variable
+            bad_char = left_side[pos]
+            raise ValueError(
+                f"No se puede interpretar el carácter '{bad_char}' "
+                f"en la posición {pos} de '{left_side}'.\n"
+                f"Formatos válidos: '2x', '-y', '1/2 z', '(1/2)x', '0.5x'"
+            )
+
+        full_term      = match.group(0)
+        sign           = match.group(1)         # '+', '-', o ''
+        num_str        = match.group(2)         # parte numérica
+        var_after_num  = match.group(3)         # variable tras número
+        var_standalone = match.group(4)         # variable sola (sin número)
+
         if var_standalone:
+            # Caso: solo la variable → coef implícito 1
             val = Fraction(1)
             var = var_standalone
         else:
-            # num_str must exist because of the regex structure
             try:
-                # Handle possible '*' between number and var (just in case split/join missed something)
-                clean_num = num_str.replace('*', '')
-                val = parse_fraction(clean_num)
+                val = parse_fraction(num_str)
                 var = var_after_num if var_after_num else None
-            except:
-                raise ValueError(f"Formato numérico inválido: '{num_str}'")
-        
+            except Exception:
+                raise ValueError(f"Coeficiente numérico inválido: '{num_str}'")
+
+        # Aplicar signo
         if sign == '-':
             val = -val
-            
+
         if var:
             coeffs[var] += val
         else:
-            # Constant on left side, move to right
+            # Constante en el LHS → pasar al RHS con signo contrario
             rhs -= val
-            
+
         pos += len(full_term)
-            
+
     return [coeffs['x'], coeffs['y'], coeffs['z'], rhs]
