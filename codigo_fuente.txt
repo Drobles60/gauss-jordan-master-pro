@@ -1,0 +1,1534 @@
+================================================================================
+GAUSS-JORDAN MASTER PRO - CODIGO FUENTE COMPLETO
+Analisis Numerico - Ingenieria de Sistemas
+Universidad Francisco de Paula Santander Ocana
+================================================================================
+
+================================================================================
+ARCHIVO: main.py
+================================================================================
+import sys
+from PySide6.QtWidgets import QApplication
+from ui.main_window import MainWindow
+
+def main():
+    # Inicializa la aplicación Qt
+    app = QApplication(sys.argv)
+    
+    # Crea y muestra la ventana principal
+    window = MainWindow()
+    window.show()
+    
+    # Ejecuta el bucle de eventos
+    sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+ARCHIVO: logic/calculator.py
+================================================================================
+"""
+calculator.py — Utilidades de cálculo numérico
+===============================================
+Proporciona dos componentes:
+
+  1. SafeEvaluator: evalúa expresiones matemáticas en texto sin usar eval(),
+     evitando vulnerabilidades de seguridad.  Soporta +, -, *, /, paréntesis.
+
+  2. parse_fraction(text): convierte una cadena como "1/2" o "-3.5" a
+     fractions.Fraction para mantener precisión aritmética exacta.
+
+Entrada:  Cadena de texto con expresión o número (str)
+Salida:   Valor numérico (int, float, o Fraction)
+"""
+import ast
+import operator as op
+from fractions import Fraction
+
+
+class SafeEvaluator:
+    """
+    Evaluador seguro de expresiones matemáticas simples.
+
+    Usa el árbol de sintaxis abstracta (AST) de Python para interpretar
+    la expresión sin ejecutar código arbitrario (alternativa segura a eval()).
+
+    Operadores soportados: +  -  *  /  y negación unaria (-)
+    """
+
+    # Tabla de operadores permitidos: tipo de nodo AST → función Python
+    operators = {
+        ast.Add:  op.add,    # a + b
+        ast.Sub:  op.sub,    # a - b
+        ast.Mult: op.mul,    # a * b
+        ast.Div:  op.truediv, # a / b
+        ast.USub: op.neg     # -a
+    }
+
+    def evaluate(self, expression):
+        """
+        Evalúa una expresión matemática dada como cadena de texto.
+
+        Args:
+            expression (str): Expresión, ej: "3 + 2*5", "(1+2)/3"
+
+        Returns:
+            int | float: Resultado de la evaluación.
+
+        Raises:
+            ValueError: Si la expresión contiene operadores o construcciones no permitidas.
+        """
+        if not expression:
+            return 0
+        try:
+            # Parsear la cadena como árbol AST de Python (modo expresión)
+            node = ast.parse(expression, mode='eval').body
+            return self._eval_node(node)
+        except Exception as e:
+            raise ValueError(f"Expresión inválida: {e}")
+
+    def _eval_node(self, node):
+        """
+        Recorre recursivamente el árbol AST y calcula el valor de cada nodo.
+
+        Args:
+            node: Nodo del árbol AST de Python.
+
+        Returns:
+            Valor numérico del sub-árbol.
+
+        Raises:
+            TypeError: Si el nodo contiene una construcción no permitida.
+        """
+        if isinstance(node, ast.Num):        # Literal numérico (Python < 3.8)
+            return node.n
+        elif isinstance(node, ast.Constant):  # Literal numérico (Python 3.8+)
+            return node.value
+        elif isinstance(node, ast.BinOp):     # Operación binaria: a OP b
+            left  = self._eval_node(node.left)
+            right = self._eval_node(node.right)
+            return self.operators[type(node.op)](left, right)
+        elif isinstance(node, ast.UnaryOp):   # Operación unaria: -a
+            return self.operators[type(node.op)](self._eval_node(node.operand))
+        else:
+            raise TypeError(f"Operación no permitida: {type(node)}")
+
+
+# ---------------------------------------------------------------------------
+# Función auxiliar de parseo
+# ---------------------------------------------------------------------------
+
+def parse_fraction(text):
+    """
+    Convierte una cadena de texto a fractions.Fraction con precisión exacta.
+
+    Acepta:
+      - Enteros:    "3"  → Fraction(3, 1)
+      - Decimales:  "1.5"  → Fraction(3, 2)
+      - Fracciones: "1/2"  → Fraction(1, 2)
+      - Negativos:  "-3/4" → Fraction(-3, 4)
+      - Vacío:      ""     → Fraction(0)
+
+    Args:
+        text (str): Representación textual del número.
+
+    Returns:
+        Fraction: Valor exacto.
+
+    Raises:
+        ValueError: Si el formato no es reconocible.
+    """
+    try:
+        text = text.strip().replace(' ', '')   # eliminar espacios residuales
+        if not text:
+            return Fraction(0)
+        return Fraction(text)
+    except Exception:
+        raise ValueError(f"Formato numérico inválido: '{text}'")
+
+================================================================================
+ARCHIVO: logic/parser.py
+================================================================================
+"""
+parser.py — Intérprete robusto de ecuaciones lineales
+======================================================
+Convierte una ecuación lineal escrita en texto libre a [a, b, c, d] como Fraction.
+Soporta todos los formatos de entrada comunes:
+
+  Formatos de coeficiente aceptados:
+    2x          coeficiente entero
+    -3x         coeficiente negativo
+    1/2 x       fracción separada
+    (1/2)x      fracción entre paréntesis
+    0.5x        decimal
+    x           coeficiente implícito 1
+    -x          coeficiente implícito -1
+    2*x         con asterisco multiplicador
+
+  Formatos de constante:
+    = 5         entero
+    = -3.5      decimal negativo
+    = 1/2       fracción
+    = 0         cero
+
+Entrada:  str  — ecuación como texto (ej: "(1/2)x + y - z = 8")
+Salida:   list[Fraction] — [coef_x, coef_y, coef_z, rhs]
+"""
+import re
+from fractions import Fraction
+from logic.calculator import parse_fraction
+
+
+def _preprocess(eq_str):
+    """
+    Normaliza la cadena antes del parseo principal:
+      1. Elimina todos los espacios.
+      2. Convierte a minúsculas.
+      3. Reemplaza (a/b) → a/b  (fracciones entre paréntesis).
+      4. Reemplaza * entre número y variable → vacío (2*x → 2x).
+      5. Convierte decimales como coeficientes (0.5x → fracción internamente aceptada).
+    """
+    s = "".join(eq_str.lower().split())
+
+    # (a/b) o (a) → quitar paréntesis cuando el contenido es numérico
+    # Ej: (1/2)x → 1/2 x,   (-3)x → -3x
+    s = re.sub(r'\(([+-]?[\d\.]+(?:/[\d\.]+)?)\)', r'\1', s)
+
+    # Eliminar asterisco multiplicador: 2*x → 2x
+    s = s.replace('*', '')
+
+    return s
+
+
+def parse_equation(eq_str):
+    """
+    Parsea una ecuación lineal de 3 variables (x, y, z).
+
+    Soporta:
+      - Coeficientes enteros, decimales, fracciones simples y entre paréntesis.
+      - Coeficiente implícito 1 o -1 (solo la variable).
+      - Constantes en el lado izquierdo (se mueven al lado derecho).
+      - Espacios libres y mezcla de formatos.
+
+    Args:
+        eq_str (str): Ecuación en texto. Debe contener '='.
+
+    Returns:
+        list[Fraction]: [coef_x, coef_y, coef_z, rhs]
+
+    Raises:
+        ValueError: Si el formato es irreconocible.
+    """
+    if "=" not in eq_str:
+        raise ValueError("La ecuación debe contener el signo '='")
+
+    # Separar antes de normalizar para no perder el '='
+    raw_left, raw_right = eq_str.split("=", 1)
+
+    # Normalizar cada lado por separado
+    left_side = _preprocess(raw_left)
+    right_side = _preprocess(raw_right)
+
+    # Parsear el RHS (término independiente)
+    try:
+        rhs = parse_fraction(right_side) if right_side else Fraction(0)
+    except Exception:
+        raise ValueError(f"El lado derecho '{raw_right.strip()}' no es un número válido.")
+
+    # Diccionario de coeficientes
+    coeffs = {'x': Fraction(0), 'y': Fraction(0), 'z': Fraction(0)}
+
+    # Patrón ampliado:
+    #   Grupo 1: signo opcional  [+-]
+    #   Alternativa A: número (entero, decimal o fracción a/b) seguido de variable opcional
+    #   Alternativa B: variable sola (coeficiente implícito 1)
+    #
+    # Número: dígitos con punto decimal y/o barra de fracción
+    NUM = r'[\d]+(?:\.[\d]+)?(?:/[\d]+(?:\.[\d]+)?)?'
+    pattern = re.compile(
+        rf'([+-]?)(?:({NUM})([xyz]?)|([xyz]))'
+    )
+
+    pos = 0
+    while pos < len(left_side):
+        match = pattern.match(left_side, pos)
+        if not match:
+            bad_char = left_side[pos]
+            raise ValueError(
+                f"No se puede interpretar el carácter '{bad_char}' "
+                f"en la posición {pos} de '{left_side}'.\n"
+                f"Formatos válidos: '2x', '-y', '1/2 z', '(1/2)x', '0.5x'"
+            )
+
+        full_term      = match.group(0)
+        sign           = match.group(1)         # '+', '-', o ''
+        num_str        = match.group(2)         # parte numérica
+        var_after_num  = match.group(3)         # variable tras número
+        var_standalone = match.group(4)         # variable sola (sin número)
+
+        if var_standalone:
+            # Caso: solo la variable → coef implícito 1
+            val = Fraction(1)
+            var = var_standalone
+        else:
+            try:
+                val = parse_fraction(num_str)
+                var = var_after_num if var_after_num else None
+            except Exception:
+                raise ValueError(f"Coeficiente numérico inválido: '{num_str}'")
+
+        # Aplicar signo
+        if sign == '-':
+            val = -val
+
+        if var:
+            coeffs[var] += val
+        else:
+            # Constante en el LHS → pasar al RHS con signo contrario
+            rhs -= val
+
+        pos += len(full_term)
+
+    return [coeffs['x'], coeffs['y'], coeffs['z'], rhs]
+
+================================================================================
+ARCHIVO: logic/solver.py
+================================================================================
+"""
+solver.py — Motor de resolución Gauss-Jordan
+=============================================
+Implementa el algoritmo de Gauss-Jordan con pivoteo parcial para resolver
+sistemas de 3 ecuaciones lineales con 3 incógnitas.
+
+Entrada:  matrix (list[list[Fraction]]) — Matriz aumentada 3x4 [A|b]
+Salida:   (status: str, resultado: list | str) — Tipo de solución y valores x,y,z
+"""
+from fractions import Fraction
+import copy
+
+
+class GaussJordanSolver:
+    """
+    Resuelve sistemas de ecuaciones lineales 3×3 usando el método de Gauss-Jordan.
+
+    Usa fractions.Fraction internamente para mantener precisión aritmética exacta
+    (sin errores de punto flotante en la representación de fracciones).
+
+    Atributos:
+        matrix (list[list[Fraction]]): Copia profunda de la matriz aumentada [A|b].
+        steps (list[dict]):  Historial de pasos con estado de la matriz,
+                             operación realizada y explicación didáctica.
+    """
+
+    def __init__(self, matrix):
+        """
+        Inicializa el solver con la matriz aumentada.
+
+        Args:
+            matrix: list[list[Fraction]] de dimensión 3×4.
+                    Columnas 0-2 son los coeficientes; columna 3 es el término independiente.
+        """
+        # Copiamos profundamente para no modificar la matriz original del llamador
+        self.matrix = copy.deepcopy(matrix)
+        self.steps = []  # Cada elemento: {matrix, operation, explanation, highlight_rows}
+        self._record_step("Inicio", "Se construye la matriz aumentada [A|b] con los valores ingresados.")
+
+    # ------------------------------------------------------------------
+    # Métodos internos
+    # ------------------------------------------------------------------
+
+    def _record_step(self, operation, explanation, highlight_rows=None):
+        """
+        Guarda un snapshot del estado actual de la matriz junto con la descripción del paso.
+
+        Args:
+            operation (str):       Nombre corto de la operación (ej: "R1 ← R1 / 2").
+            explanation (str):     Descripción didáctica en español.
+            highlight_rows (dict): Mapeo {índice_fila: rol} para colorear en la UI.
+                                   Roles válidos: 'pivot' (verde), 'target' (rojo), 'swap' (amarillo).
+        """
+        self.steps.append({
+            "matrix": copy.deepcopy(self.matrix),   # snapshot inmutable
+            "operation": operation,
+            "explanation": explanation,
+            "highlight_rows": highlight_rows or {}
+        })
+
+    # ------------------------------------------------------------------
+    # Algoritmo principal
+    # ------------------------------------------------------------------
+
+    def solve(self):
+        """
+        Ejecuta el algoritmo de Gauss-Jordan completo con pivoteo parcial.
+
+        El proceso tiene 3 sub-pasos por cada columna pivote h:
+          1. Pivoteo parcial: elegir la fila con el mayor valor absoluto en la columna h.
+          2. Normalización: dividir la fila pivote para que matrix[h][h] = 1.
+          3. Eliminación: anular el valor en la columna h para todas las filas i ≠ h.
+
+        Returns:
+            tuple: ("Solución única",    [x, y, z])       si el sistema tiene solución única.
+                   ("No tiene solución", str_mensaje)     si hay contradicción.
+                   ("Infinitas soluciones", str_mensaje)  si el sistema es indeterminado.
+        """
+        rows = 3
+        cols = 3  # La parte A es 3×3; la matriz aumentada es 3×4
+
+        for h in range(rows):  # h = índice de la columna/fila pivote actual
+
+            # ── Paso 1: Pivoteo parcial ──────────────────────────────────────
+            # Busca la fila de índice >= h que tenga el mayor valor absoluto
+            # en la columna h. Esto mejora la estabilidad numérica.
+            max_row = max(range(h, rows), key=lambda i: abs(self.matrix[i][h]))
+
+            if self.matrix[max_row][h] == 0:
+                # Toda la columna h (desde la fila h) es cero → columna singular.
+                # No podemos crear un pivote aquí; continuamos con la siguiente columna.
+                continue
+
+            if max_row != h:
+                # Intercambiamos para llevar el mejor pivote a la fila h
+                self.matrix[h], self.matrix[max_row] = self.matrix[max_row], self.matrix[h]
+                self._record_step(
+                    f"R{h+1} ↔ R{max_row+1}",
+                    f"Intercambiamos la fila {h+1} con la {max_row+1} para usar el valor más grande como pivote.",
+                    {h: 'swap', max_row: 'swap'}
+                )
+
+            # ── Paso 2: Normalización del pivote ─────────────────────────────
+            # Dividimos todos los elementos de la fila h por matrix[h][h],
+            # de modo que el elemento pivote quede igual a 1.
+            pivot = self.matrix[h][h]
+            if pivot != 1:
+                self.matrix[h] = [x / pivot for x in self.matrix[h]]
+                self._record_step(
+                    f"R{h+1} ← R{h+1} / ({pivot})",
+                    f"Dividimos la fila {h+1} por el pivote {pivot} para normalizar a 1.",
+                    {h: 'pivot'}
+                )
+            else:
+                # El pivote ya es 1; solo registramos el paso informativo
+                self._record_step(
+                    "Pivote listo",
+                    f"El elemento en R{h+1},C{h+1} ya es 1. Usamos esta fila como base.",
+                    {h: 'pivot'}
+                )
+
+            # ── Paso 3: Eliminación en todas las demás filas ─────────────────
+            # Para cada fila i ≠ h, restamos el múltiplo adecuado de la fila h
+            # de modo que la columna h quede con 0 en las filas i.
+            for i in range(rows):
+                if i != h:
+                    factor = self.matrix[i][h]   # valor a eliminar
+                    if factor != 0:
+                        # Ri ← Ri - factor * Rh
+                        self.matrix[i] = [
+                            self.matrix[i][j] - factor * self.matrix[h][j]
+                            for j in range(cols + 1)
+                        ]
+                        self._record_step(
+                            f"R{i+1} ← R{i+1} - ({factor}) * R{h+1}",
+                            f"Hacemos cero la posición C{h+1} en la fila {i+1} usando la fila pivote R{h+1}.",
+                            {h: 'pivot', i: 'target'}
+                        )
+
+        return self._analyze_result()
+
+    # ------------------------------------------------------------------
+    # Análisis del resultado
+    # ------------------------------------------------------------------
+
+    def _analyze_result(self):
+        """
+        Determina el tipo de solución después de aplicar Gauss-Jordan.
+
+        Casos posibles:
+          • Fila [ 0  0  0 | c≠0 ] → Sin solución (sistema inconsistente).
+          • Fila [ 0  0  0 |  0  ] → Infinitas soluciones (filas dependientes).
+          • Ninguno de los anteriores → Solución única; lee x,y,z de la columna 3.
+
+        Returns:
+            tuple: (tipo_solución: str, resultado)
+        """
+        rows = 3
+        cols = 3
+        has_infinite = False
+
+        for i in range(rows):
+            # Verifica si todos los coeficientes de la fila son cero
+            all_zeros_a = all(self.matrix[i][j] == 0 for j in range(cols))
+            if all_zeros_a:
+                if self.matrix[i][cols] != 0:
+                    # Contradicción: 0 = constante no nula → sin solución
+                    return "No tiene solución", "Se detectó una contradicción (0 = constante no nula)."
+                else:
+                    # Fila de ceros completa → sistema indeterminado
+                    has_infinite = True
+
+        if has_infinite:
+            return "Infinitas soluciones", "El sistema es compatible indeterminado (filas dependientes)."
+
+        # Si llegamos aquí la submatriz izquierda es la identidad
+        # La solución está en la columna de términos independientes
+        unique_results = [self.matrix[i][cols] for i in range(rows)]  # [x, y, z]
+        return "Solución única", unique_results
+
+================================================================================
+ARCHIVO: ui/main_window.py
+================================================================================
+"""
+main_window.py — Ventana principal de Gauss-Jordan Master Pro
+"""
+import qtawesome as qta
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QMessageBox, QCheckBox,
+    QGroupBox, QLineEdit, QFrame, QDialog,
+    QTextBrowser, QTabWidget, QScrollArea, QSizePolicy
+)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
+
+from ui.widgets.matrix_grid import MatrixGrid
+from ui.widgets.step_viewer import StepViewer
+from ui.widgets.graph_3d import Graph3DWidget
+from logic.solver import GaussJordanSolver
+from ui.styles import MAIN_STYLE
+
+# ── Ejemplos predefinidos ────────────────────────────────────────────────────
+EXAMPLES = [
+    {
+        "label": "Ejemplo 1",
+        "color": "#a6e3a1", "dark": "#1a2a1a",
+        "tooltip": "Solución única: x=2, y=3, z=-1",
+        "eqs": ["2x + y - z = 8", "-3x - y + 2z = -11", "-2x + y + 2z = -3"],
+    },
+    {
+        "label": "Ejemplo 2",
+        "color": "#a6e3a1", "dark": "#1a2a1a",
+        "tooltip": "Solución única: x=1, y=-1, z=2",
+        "eqs": ["x - 2y + 3z = 9", "-x + 3y = -4", "2x - 5y + 5z = 17"],
+    },
+    {
+        "label": "Sin Solución",
+        "color": "#f38ba8", "dark": "#2a1a1a",
+        "tooltip": "Sistema inconsistente (sin solución)",
+        "eqs": ["x + y + z = 6", "2x + 2y + 2z = 14", "3x + 3y + 3z = 20"],
+    },
+    {
+        "label": "∞ Soluciones",
+        "color": "#f9e2af", "dark": "#2a2a10",
+        "tooltip": "Sistema indeterminado (infinitas soluciones)",
+        "eqs": ["x + 2y + 3z = 6", "2x + 4y + 6z = 12", "3x + 6y + 9z = 18"],
+    },
+]
+
+# ── Diálogo de Ayuda ─────────────────────────────────────────────────────────
+class HelpDialog(QDialog):
+    MANUAL_HTML = """
+    <h2 style="color:#89b4fa;">Manual de Usuario — Gauss-Jordan Master Pro</h2>
+    <hr style="border-color:#2a2a40;"/>
+    <h3 style="color:#89dceb;">¿Qué hace esta aplicación?</h3>
+    <p>Resuelve sistemas de <b>3 ecuaciones lineales con 3 incógnitas</b> (x, y, z)
+    usando el método de <b>Gauss-Jordan con pivoteo parcial</b>.</p>
+
+    <h3 style="color:#89dceb;">Ingreso de datos</h3>
+    <p><b>Por ecuaciones (texto libre):</b></p>
+    <ul>
+      <li><code>2x + y - z = 8</code> — enteros</li>
+      <li><code>(1/2)x + y - z = 1</code> — fracción con paréntesis</li>
+      <li><code>0.5x - y + z = 3</code> — decimal</li>
+      <li><code>-x + 3y = -4</code> — coeficiente implícito</li>
+    </ul>
+    <p><b>Por la matriz [A|b]:</b> llena las celdas directamente (columna dorada = término independiente).</p>
+    <p><b>Ejemplos rápidos:</b> carga sistemas predefinidos con un clic.</p>
+
+    <h3 style="color:#89dceb;">Interpretar resultados</h3>
+    <ul>
+      <li><span style="color:#a6e3a1;">Verde</span> = Solución única (x, y, z)</li>
+      <li><span style="color:#f38ba8;">Rojo</span> = Sin solución (sistema inconsistente)</li>
+      <li><span style="color:#f9e2af;">Amarillo</span> = Infinitas soluciones</li>
+    </ul>
+    <p><b>Pasos:</b> Verde = fila pivote · Rojo = fila modificada · Amarillo = filas intercambiadas.</p>
+    <p><b>Gráfica 3D:</b> punto rojo = solución. Azul/Verde/Amarillo = Planos E1/E2/E3.</p>
+
+    <h3 style="color:#89dceb;">Ejemplo</h3>
+    <pre style="background:#1a1a2e;padding:10px;border-radius:8px;color:#cdd6f4;">
+E1:  2x + y  - z  =  8
+E2: -3x - y  + 2z = -11
+E3: -2x + y  + 2z = -3
+→  x = 2,  y = 3,  z = -1</pre>
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manual de Usuario")
+        self.resize(620, 580)
+        self.setStyleSheet("background:#12121f; color:#cdd6f4;")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 18, 18, 18)
+        lay.setSpacing(10)
+        browser = QTextBrowser()
+        browser.setHtml(self.MANUAL_HTML)
+        browser.setStyleSheet(
+            "QTextBrowser{background:#1a1a2e;border:1px solid #2a2a40;"
+            "border-radius:10px;padding:14px;font-size:13px;color:#cdd6f4;}"
+        )
+        lay.addWidget(browser)
+        btn = QPushButton("  Cerrar")
+        btn.setIcon(qta.icon("fa5s.times", color="#0d0d1a"))
+        btn.setFixedHeight(40)
+        btn.setStyleSheet(
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #7c6ff2,stop:1 #89b4fa);color:#0d0d1a;border:none;"
+            "border-radius:8px;font-weight:700;font-size:13px;}"
+            "QPushButton:hover{background:#b4d0ff;}"
+        )
+        btn.clicked.connect(self.accept)
+        lay.addWidget(btn)
+
+
+# ── Ventana Principal ────────────────────────────────────────────────────────
+class MainWindow(QMainWindow):
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Gauss-Jordan Master Pro")
+        self.resize(1220, 860)
+        self.setMinimumSize(1000, 700)
+        self.setStyleSheet(MAIN_STYLE)
+
+        self._last_matrix   = None
+        self._last_solution = None
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(26, 18, 26, 18)
+        root.setSpacing(16)
+
+        # ── Encabezado ───────────────────────────────────────────────────────
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+
+        title_col = QVBoxLayout()
+        title_col.setSpacing(1)
+        t = QLabel("Gauss-Jordan Master Pro")
+        t.setObjectName("title")
+        s = QLabel("ANÁLISIS NUMÉRICO  ·  ÁLGEBRA LINEAL  ·  ING. SISTEMAS")
+        s.setObjectName("subtitle")
+        title_col.addWidget(t)
+        title_col.addWidget(s)
+        hdr.addLayout(title_col)
+        hdr.addStretch()
+
+        for icon_name, tooltip, slot, color in [
+            ("fa5s.trash-alt",       "Limpiar campos",    self._clear_all,  "#f38ba8"),
+            ("fa5s.question-circle", "Manual de usuario", self._show_help,  "#89b4fa"),
+        ]:
+            b = QPushButton()
+            b.setIcon(qta.icon(icon_name, color=color))
+            b.setToolTip(tooltip)
+            b.setFixedSize(44, 44)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(slot)
+            hdr.addWidget(b)
+
+        root.addLayout(hdr)
+
+        # ── Cuerpo 2 columnas ────────────────────────────────────────────────
+        body = QHBoxLayout()
+        body.setSpacing(26)
+        root.addLayout(body)
+
+        # ════════════════════════════════════════════════
+        # COLUMNA IZQUIERDA
+        # ════════════════════════════════════════════════
+        left = QVBoxLayout()
+        left.setSpacing(14)
+        left.setAlignment(Qt.AlignTop)
+        body.addLayout(left, 16)
+
+        # ── Grupo Ecuaciones ─────────────────────────────
+        eq_group = QGroupBox("INGRESA LAS ECUACIONES")
+        eq_lay   = QVBoxLayout(eq_group)
+        eq_lay.setContentsMargins(16, 34, 16, 14)
+        eq_lay.setSpacing(10)
+
+        self.eq_inputs = []
+        hints = [
+            "Ej: 2x + y - z = 8",
+            "Ej: -3x - y + 2z = -11",
+            "Ej: -2x + y + 2z = -3",
+        ]
+        for i in range(3):
+            row = QHBoxLayout()
+            lbl = QLabel(f"<b style='color:#89dceb; font-size:15px;'>E{i+1}</b>")
+            lbl.setFixedWidth(24)
+            le = QLineEdit()
+            le.setPlaceholderText(hints[i])
+            le.setObjectName(f"eq_{i}")
+            le.setMinimumHeight(38)
+            self.eq_inputs.append(le)
+            row.addWidget(lbl)
+            row.addWidget(le)
+            eq_lay.addLayout(row)
+        left.addWidget(eq_group)
+
+        # ── Grupo Ejemplos Rápidos ───────────────────────
+        ex_group = QGroupBox("EJEMPLOS RÁPIDOS")
+        ex_lay   = QVBoxLayout(ex_group)
+        ex_lay.setContentsMargins(12, 30, 12, 12)
+        ex_lay.setSpacing(6)
+
+        row1, row2 = QHBoxLayout(), QHBoxLayout()
+        for idx, ex in enumerate(EXAMPLES):
+            btn = QPushButton(ex["label"])
+            btn.setToolTip(ex["tooltip"])
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedHeight(32)
+            c, d = ex["color"], ex["dark"]
+            btn.setStyleSheet(
+                f"QPushButton{{background:{d};border:1px solid {c};"
+                f"border-radius:8px;color:{c};font-size:12px;font-weight:600;padding:0 8px;}}"
+                f"QPushButton:hover{{background:{c}25;border:1px solid {c};}}"
+                f"QPushButton:pressed{{background:{c}50;}}"
+            )
+            btn.clicked.connect(lambda _, e=ex: self._load_example(e))
+            (row1 if idx < 2 else row2).addWidget(btn)
+
+        ex_lay.addLayout(row1)
+        ex_lay.addLayout(row2)
+        left.addWidget(ex_group)
+
+        # ── Grupo Matriz [A|b] ───────────────────────────
+        mat_group = QGroupBox("REPRESENTACIÓN MATRICIAL  [A | b]")
+        mat_lay   = QVBoxLayout(mat_group)
+        mat_lay.setContentsMargins(14, 32, 14, 14)
+        mat_lay.setSpacing(12)
+
+        self.matrix_grid = MatrixGrid()
+        mat_lay.addWidget(self.matrix_grid, alignment=Qt.AlignCenter)
+
+        self.check_fraction = QCheckBox("  Modo Fracciones (resultados exactos)")
+        self.check_fraction.setChecked(True)
+        self.check_fraction.stateChanged.connect(self._toggle_output_format)
+        mat_lay.addWidget(self.check_fraction)
+        left.addWidget(mat_group)
+
+        # ── Botón principal ──────────────────────────────
+        self.action_btn = QPushButton("   INTERPRETAR Y RESOLVER")
+        self.action_btn.setIcon(qta.icon("fa5s.magic", color="#0d0d1a"))
+        self.action_btn.setObjectName("actionButton")
+        self.action_btn.setCursor(Qt.PointingHandCursor)
+        self.action_btn.setFixedHeight(60)
+        self.action_btn.clicked.connect(self._handle_main_action)
+        left.addWidget(self.action_btn)
+        left.addStretch()
+
+        # ════════════════════════════════════════════════
+        # COLUMNA DERECHA
+        # ════════════════════════════════════════════════
+        right = QVBoxLayout()
+        right.setSpacing(12)
+        body.addLayout(right, 32)
+
+        # Pestañas
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        # Pestaña 1: Procedimiento paso a paso
+        tab_steps = QWidget()
+        tsl = QVBoxLayout(tab_steps)
+        tsl.setContentsMargins(0, 8, 0, 0)
+        self.step_viewer = StepViewer()
+        tsl.addWidget(self.step_viewer)
+        self.tabs.addTab(tab_steps,
+                         qta.icon("fa5s.list-ol", color="#89b4fa"),
+                         "  Procedimiento Paso a Paso")
+
+        # Pestaña 2: Gráfica 3D
+        tab_graph = QWidget()
+        tgl = QVBoxLayout(tab_graph)
+        tgl.setContentsMargins(0, 8, 0, 0)
+        self.graph_3d = Graph3DWidget()
+        tgl.addWidget(self.graph_3d)
+
+        lbl_legend = QLabel(
+            "<span style='color:#89b4fa;'>■</span> Plano E1 &nbsp;&nbsp;"
+            "<span style='color:#a6e3a1;'>■</span> Plano E2 &nbsp;&nbsp;"
+            "<span style='color:#f9e2af;'>■</span> Plano E3 &nbsp;&nbsp;"
+            "<span style='color:#f38ba8;'>●</span> Solución"
+        )
+        lbl_legend.setAlignment(Qt.AlignCenter)
+        lbl_legend.setStyleSheet("font-size:12px; color:#a6adc8; padding:4px 0;")
+        tgl.addWidget(lbl_legend)
+
+        self.tabs.addTab(tab_graph,
+                         qta.icon("fa5s.cube", color="#a6e3a1"),
+                         "  Gráfica 3D")
+
+        right.addWidget(self.tabs)
+
+        # Banner resultado
+        self.result_frame = QFrame()
+        self.result_frame.setFixedHeight(58)
+        self._set_banner_style("idle")
+        res_lay = QHBoxLayout(self.result_frame)
+        res_lay.setContentsMargins(18, 0, 18, 0)
+        self.result_label = QLabel("Ingresa las ecuaciones y presiona  RESOLVER")
+        self.result_label.setAlignment(Qt.AlignCenter)
+        self._set_result_label_style("idle")
+        res_lay.addWidget(self.result_label)
+        right.addWidget(self.result_frame)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Helpers de estilo
+    # ──────────────────────────────────────────────────────────────────────────
+    def _set_banner_style(self, mode):
+        colors = {
+            "idle":    ("stop:0 #1a1a30,stop:1 #1e2030", "#f9ab6e"),
+            "ok":      ("stop:0 #1a2a1a,stop:1 #1a301a", "#a6e3a1"),
+            "error":   ("stop:0 #2a1a1a,stop:1 #2a1a1a", "#f38ba8"),
+            "inf":     ("stop:0 #2a2a10,stop:1 #1a2a10", "#f9e2af"),
+        }
+        grad, border = colors[mode]
+        self.result_frame.setStyleSheet(
+            f"QFrame{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,{grad});"
+            f"border:2px solid {border};border-radius:12px;}}"
+        )
+
+    def _set_result_label_style(self, mode):
+        colors = {"idle": "#fab387", "ok": "#a6e3a1", "error": "#f38ba8", "inf": "#f9e2af"}
+        self.result_label.setStyleSheet(
+            f"color:{colors[mode]};font-weight:800;font-size:15px;border:none;"
+        )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Lógica
+    # ──────────────────────────────────────────────────────────────────────────
+    def _handle_main_action(self):
+        if self._parse_equations_silent():
+            self._solve_system()
+
+    def _load_example(self, ex):
+        for i, eq in enumerate(ex["eqs"]):
+            self.eq_inputs[i].setText(eq)
+        self._parse_equations_silent()
+
+    def _parse_equations_silent(self):
+        from logic.parser import parse_equation
+        any_filled = any(le.text().strip() for le in self.eq_inputs)
+        if not any_filled:
+            return True
+
+        for i, le in enumerate(self.eq_inputs):
+            if not le.text().strip():
+                QMessageBox.warning(self, "Ecuación incompleta",
+                    f"La ecuación E{i+1} está vacía.\n"
+                    f"Completa las 3, o déjalas todas vacías para usar la matriz.")
+                le.setFocus()
+                return False
+
+        try:
+            for i, le in enumerate(self.eq_inputs):
+                row = parse_equation(le.text().strip())
+                for j, val in enumerate(row):
+                    self.matrix_grid.cells[i][j].setText(str(val))
+        except Exception as e:
+            QMessageBox.warning(self, "Error de interpretación",
+                f"No pude interpretar una ecuación:\n\n{e}\n\n"
+                f"Formatos válidos: '2x + y - z = 8'  |  '(1/2)x - y = 3'  |  '0.5x + y = 1'")
+            return False
+        return True
+
+    def _validate_matrix(self):
+        from logic.calculator import parse_fraction
+        from fractions import Fraction
+        for r in range(3):
+            for c in range(4):
+                txt = self.matrix_grid.cells[r][c].text().strip()
+                if not txt:
+                    QMessageBox.warning(self, "Celda vacía",
+                        f"Fila {r+1}, columna {c+1} está vacía.\nIngresa 0 si el coeficiente es cero.")
+                    self.matrix_grid.cells[r][c].setFocus()
+                    return False
+                try:
+                    parse_fraction(txt)
+                except ValueError:
+                    QMessageBox.warning(self, "Valor inválido",
+                        f"'{txt}' (fila {r+1}, col {c+1}) no es un número válido.\n"
+                        f"Usa entero, decimal (1.5) o fracción (1/2).")
+                    self.matrix_grid.cells[r][c].setFocus()
+                    return False
+        for r in range(3):
+            from logic.calculator import parse_fraction
+            from fractions import Fraction
+            if all(parse_fraction(self.matrix_grid.cells[r][c].text().strip()) == Fraction(0)
+                   for c in range(3)):
+                QMessageBox.warning(self, "Fila de ceros",
+                    f"La fila {r+1} tiene todos los coeficientes en cero.\n"
+                    f"El sistema no está bien planteado.")
+                return False
+        return True
+
+    def _solve_system(self):
+        if not self._validate_matrix():
+            return
+        try:
+            data   = self.matrix_grid.get_matrix_data()
+            solver = GaussJordanSolver(data)
+            status, res = solver.solve()
+
+            self.step_viewer.set_steps(solver.steps)
+            self._last_matrix = data
+
+            if status == "Solución única":
+                self._last_solution = res
+                fmt = lambda v: str(v) if self.check_fraction.isChecked() else f"{float(v):.4f}"
+                x, y, z = res
+                self.result_label.setText(f"✓  SOLUCIÓN ÚNICA:  x = {fmt(x)}   |   y = {fmt(y)}   |   z = {fmt(z)}")
+                self._set_banner_style("ok");  self._set_result_label_style("ok")
+            elif status == "No tiene solución":
+                self._last_solution = None
+                self.result_label.setText("✗  SIN SOLUCIÓN — Sistema inconsistente (0 = c ≠ 0)")
+                self._set_banner_style("error"); self._set_result_label_style("error")
+            else:
+                self._last_solution = None
+                self.result_label.setText("∞  INFINITAS SOLUCIONES — Sistema indeterminado")
+                self._set_banner_style("inf"); self._set_result_label_style("inf")
+
+            # Gráfica en hilo separado (sin lag)
+            self.graph_3d.plot(data, self._last_solution)
+            self.tabs.setCurrentIndex(0)   # mantener en Procedimiento
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error de cálculo", str(e))
+
+    def _toggle_output_format(self):
+        self.step_viewer.toggle_format(self.check_fraction.isChecked())
+        if self.step_viewer.steps:
+            self._solve_system()
+
+    def _clear_all(self):
+        for le in self.eq_inputs:
+            le.clear()
+        for row in self.matrix_grid.cells:
+            for cell in row:
+                cell.clear()
+        self.step_viewer.set_steps([])
+        self.graph_3d._placeholder()
+        self.result_label.setText("Ingresa las ecuaciones y presiona  RESOLVER")
+        self._set_banner_style("idle"); self._set_result_label_style("idle")
+        self.tabs.setCurrentIndex(0)
+
+    def _show_help(self):
+        HelpDialog(self).exec()
+
+================================================================================
+ARCHIVO: ui/styles.py
+================================================================================
+"""
+styles.py — Hoja de estilos global de la aplicación
+Paleta: Catppuccin Mocha mejorada con degradados y efectos premium.
+"""
+
+MAIN_STYLE = """
+/* ── Ventana y widgets base ── */
+QMainWindow, QDialog {
+    background-color: #0d0d1a;
+}
+
+QWidget {
+    font-family: 'Segoe UI', 'Inter', sans-serif;
+    color: #cdd6f4;
+    font-size: 14px;
+}
+
+/* ── Grupos ── */
+QGroupBox {
+    border: 1px solid #2a2a40;
+    border-radius: 14px;
+    margin-top: 28px;
+    background-color: #12121f;
+    padding: 5px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 18px;
+    padding: 4px 14px;
+    color: #89dceb;
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    background-color: #1a1a2e;
+    border: 1px solid #2a2a40;
+    border-radius: 6px;
+}
+
+/* ── Entradas de texto ── */
+QLineEdit {
+    background-color: #1e1e30;
+    border: 2px solid #3a3a55;
+    border-radius: 10px;
+    padding: 9px 12px;
+    font-size: 14px;
+    color: #e0e6ff;
+    selection-background-color: #585b99;
+}
+
+QLineEdit:focus {
+    border: 2px solid #89b4fa;
+    background-color: #22223a;
+}
+
+QLineEdit:hover {
+    border: 2px solid #585b70;
+}
+
+QLineEdit[invalid="true"] {
+    border: 2px solid #f38ba8;
+    background-color: #2a1a20;
+}
+
+QLineEdit::placeholder {
+    color: #585b70;
+}
+
+/* ── Botones generales ── */
+QPushButton {
+    background-color: #1e1e30;
+    border: 1px solid #3a3a55;
+    border-radius: 10px;
+    padding: 10px 20px;
+    font-weight: 600;
+    color: #cdd6f4;
+    font-size: 13px;
+}
+
+QPushButton:hover {
+    background-color: #2a2a45;
+    border: 1px solid #585b99;
+    color: #e0e6ff;
+}
+
+QPushButton:pressed {
+    background-color: #585b99;
+    color: #ffffff;
+}
+
+/* ── Botón de acción principal ── */
+QPushButton#actionButton {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #7c6ff2, stop:0.5 #89b4fa, stop:1 #74c7ec);
+    color: #0d0d1a;
+    border: none;
+    font-size: 15px;
+    font-weight: 800;
+    border-radius: 14px;
+    letter-spacing: 0.5px;
+}
+
+QPushButton#actionButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #9a90ff, stop:0.5 #b4d0ff, stop:1 #94e2ff);
+}
+
+QPushButton#actionButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #5a52cc, stop:0.5 #6a94da, stop:1 #54a7cc);
+}
+
+/* ── Botones de ejemplos ── */
+QPushButton.exampleBtn {
+    background-color: #1a2a1a;
+    border: 1px solid #2ea043;
+    border-radius: 8px;
+    color: #a6e3a1;
+    font-size: 12px;
+    padding: 6px 10px;
+}
+
+QPushButton.exampleBtn:hover {
+    background-color: #1e3a1e;
+    border-color: #3dd457;
+    color: #ceffd6;
+}
+
+/* ── Etiquetas ── */
+QLabel#title {
+    font-size: 28px;
+    font-weight: 900;
+    color: #89b4fa;
+    letter-spacing: 1px;
+}
+
+QLabel#subtitle {
+    font-size: 12px;
+    color: #585b70;
+    letter-spacing: 2px;
+    font-weight: 600;
+}
+
+/* ── Scroll Areas ── */
+QScrollArea {
+    border: none;
+    background: transparent;
+}
+
+QScrollBar:vertical {
+    background: #12121f;
+    width: 8px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical {
+    background: #3a3a55;
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #89b4fa;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+/* ── Checkbox ── */
+QCheckBox {
+    spacing: 10px;
+    color: #a6adc8;
+    font-size: 13px;
+}
+
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    border: 2px solid #3a3a55;
+    background-color: #1e1e30;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #89b4fa;
+    border-color: #89b4fa;
+    image: url(none);
+}
+
+QCheckBox::indicator:hover {
+    border-color: #89b4fa;
+}
+
+/* ── Pestañas ── */
+QTabWidget::pane {
+    border: 1px solid #2a2a40;
+    background: #12121f;
+    border-radius: 12px;
+}
+
+QTabBar::tab {
+    background: #1a1a2e;
+    padding: 10px 22px;
+    margin-right: 4px;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    color: #a6adc8;
+    font-weight: 600;
+    border: 1px solid #2a2a40;
+    border-bottom: none;
+}
+
+QTabBar::tab:selected {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #89b4fa, stop:1 #74c7ec);
+    color: #0d0d1a;
+    font-weight: 800;
+}
+
+QTabBar::tab:hover:!selected {
+    background: #22223a;
+    color: #e0e6ff;
+}
+
+/* ── Text Browser ── */
+QTextBrowser {
+    background-color: #12121f;
+    border: 1px solid #2a2a40;
+    border-radius: 12px;
+    padding: 15px;
+    font-size: 14px;
+    color: #cdd6f4;
+    selection-background-color: #585b99;
+}
+
+/* ── Tooltips ── */
+QToolTip {
+    background-color: #1e1e30;
+    color: #cdd6f4;
+    border: 1px solid #89b4fa;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+}
+
+/* ── Message Boxes ── */
+QMessageBox {
+    background-color: #12121f;
+}
+
+QMessageBox QLabel {
+    color: #cdd6f4;
+    font-size: 14px;
+}
+"""
+
+================================================================================
+ARCHIVO: ui/widgets/matrix_grid.py
+================================================================================
+from PySide6.QtWidgets import QWidget, QGridLayout, QLineEdit, QToolTip
+from PySide6.QtCore import Qt, Signal
+from logic.calculator import parse_fraction
+
+class MatrixGrid(QWidget):
+    """
+    Grid interactivo de 3x4 para ingresar la matriz aumentada.
+    """
+    cellChanged = Signal(int, int, str)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.layout = QGridLayout(self)
+        self.layout.setSpacing(10)
+        self.cells = []
+        self._init_grid()
+        
+    def _init_grid(self):
+        for row in range(3):
+            row_cells = []
+            for col in range(4):
+                edit = QLineEdit()
+                edit.setAlignment(Qt.AlignCenter)
+                edit.setPlaceholderText("0")
+                edit.setFocusPolicy(Qt.StrongFocus)
+                edit.textChanged.connect(lambda text, r=row, c=col, e=edit: self._validate_cell(e, r, c, text))
+                
+                # Rastrear foco
+                p = self.parent()
+                if p:
+                    edit.installEventFilter(p)
+                
+                # Diseño premium para las celdas
+                style = "min-width: 50px; min-height: 35px; font-weight: bold; font-size: 13px;"
+                if col == 3:
+                     # Color diferente para la columna de resultados (b)
+                    edit.setStyleSheet(style + "background-color: #3e3b2e; border-color: #f9e2af; color: #f9e2af;")
+                else:
+                    edit.setStyleSheet(style)
+                    
+                self.layout.addWidget(edit, row, col)
+                row_cells.append(edit)
+            self.cells.append(row_cells)
+        
+        self.layout.setContentsMargins(5, 5, 5, 5)
+        self.layout.setSpacing(6)
+
+    def _validate_cell(self, widget, row, col, text):
+        """Valida que el contenido sea una fracción o número válido."""
+        try:
+            if text.strip():
+                parse_fraction(text)
+            widget.setProperty("invalid", "false")
+        except ValueError:
+            widget.setProperty("invalid", "true")
+        
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        self.cellChanged.emit(row, col, text)
+
+    def get_matrix_data(self):
+        """Retorna la matriz como una lista de listas de Fractions."""
+        data = []
+        for row in range(3):
+            row_data = []
+            for col in range(4):
+                text = self.cells[row][col].text()
+                try:
+                    row_data.append(parse_fraction(text))
+                except ValueError:
+                    raise ValueError(f"Error en fila {row+1}, columna {col+1}")
+            data.append(row_data)
+        return data
+
+    def get_focused_cell(self):
+        """Retorna el widget de la celda que tiene el foco actual."""
+        for row in self.cells:
+            for cell in row:
+                if cell.hasFocus():
+                    return cell
+        return None
+
+================================================================================
+ARCHIVO: ui/widgets/step_viewer.py
+================================================================================
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QFrame, QGridLayout
+from PySide6.QtCore import Qt
+
+class StepViewer(QScrollArea):
+    """
+    Componente para visualizar los pasos de la resolución como una lista de tarjetas.
+    Usa colores para resaltar filas pivote y filas objetivo.
+    """
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setObjectName("stepViewerArea")
+        
+        self.container = QWidget()
+        self.layout = QVBoxLayout(self.container)
+        self.layout.setAlignment(Qt.AlignTop)
+        self.layout.setSpacing(15)
+        self.layout.setContentsMargins(10, 10, 10, 10)
+        self.setWidget(self.container)
+        
+        self.steps = []
+        self.show_fraction = True
+
+    def set_steps(self, steps):
+        self.steps = steps
+        self._update_ui()
+
+    def toggle_format(self, show_fraction):
+        self.show_fraction = show_fraction
+        self._update_ui()
+
+    def _update_ui(self):
+        # Limpiar layout de forma eficiente
+        while self.layout.count():
+            item = self.layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+                
+        if not self.steps:
+            return
+            
+        colors = {
+            'pivot': "#2e3b3e",  # Greenish dark
+            'target': "#3e2e2e", # Reddish dark
+            'swap': "#3e3b2e"    # Yellowish dark
+        }
+        
+        border_colors = {
+            'pivot': "#a6e3a1",
+            'target': "#f38ba8",
+            'swap': "#f9e2af"
+        }
+            
+        for i, step in enumerate(self.steps):
+            frame = QFrame()
+            # Estilo de tarjeta premium
+            frame.setStyleSheet(f"QFrame {{ background-color: #181825; border: 1px solid #313244; border-radius: 12px; }}")
+            flayout = QVBoxLayout(frame)
+            flayout.setContentsMargins(15, 15, 15, 15)
+            
+            # Encabezado del paso
+            header_layout = QHBoxLayout()
+            op_lbl = QLabel(f"PASO {i+1}: {step['operation']}")
+            op_lbl.setStyleSheet("color: #89b4fa; font-weight: 800; font-size: 14px; border: none;")
+            header_layout.addWidget(op_lbl)
+            header_layout.addStretch()
+            flayout.addLayout(header_layout)
+            
+            # Matriz con colores
+            grid_container = QWidget()
+            grid_container.setStyleSheet("background: transparent; border: none;")
+            grid = QGridLayout(grid_container)
+            grid.setSpacing(5)
+            
+            mat = step['matrix']
+            highlights = step.get('highlight_rows', {})
+            
+            for r in range(3):
+                row_role = highlights.get(r)
+                bg_color = colors.get(row_role, "#1e1e2e")
+                brd_color = border_colors.get(row_role, "#45475a")
+                
+                for c in range(4):
+                    val = mat[r][c]
+                    text = str(val) if self.show_fraction else f"{float(val):.4f}"
+                    lbl = QLabel(text)
+                    lbl.setAlignment(Qt.AlignCenter)
+                    
+                    # Estilo dinámico basado en el rol de la fila
+                    lbl_style = f"""
+                        padding: 8px; 
+                        border: 1px solid {brd_color}; 
+                        border-radius: 4px;
+                        background-color: {bg_color}; 
+                        color: #cdd6f4; 
+                        font-weight: {'bold' if row_role else 'normal'};
+                    """
+                    lbl.setStyleSheet(lbl_style)
+                    grid.addWidget(lbl, r, c)
+            
+            flayout.addWidget(grid_container)
+            
+            # Explicación detallada
+            exp_lbl = QLabel(step['explanation'])
+            exp_lbl.setWordWrap(True)
+            exp_lbl.setStyleSheet("color: #a6adc8; font-size: 13px; font-style: italic; border: none; margin-top: 10px;")
+            flayout.addWidget(exp_lbl)
+            
+            self.layout.addWidget(frame)
+
+================================================================================
+ARCHIVO: ui/widgets/graph_3d.py
+================================================================================
+"""
+graph_3d.py — Visualización 3D sin lag (rendering en QThread)
+"""
+import numpy as np
+from fractions import Fraction
+
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
+from PySide6.QtCore import Qt, QThread, Signal, QObject
+
+
+class _RenderWorker(QObject):
+    """Hilo de trabajo: genera los datos numpy sin tocar la UI."""
+    finished = Signal(list, object)   # (planos_data, solution)
+
+    def __init__(self, matrix, solution):
+        super().__init__()
+        self.matrix = matrix
+        self.solution = solution
+
+    def run(self):
+        rng = 4
+        grid = np.linspace(-rng, rng, 18)   # 18×18 → rápido y suficiente
+        xx, yy = np.meshgrid(grid, grid)
+        planes = []
+
+        for i in range(3):
+            a = float(self.matrix[i][0])
+            b = float(self.matrix[i][1])
+            c = float(self.matrix[i][2])
+            d = float(self.matrix[i][3])
+            planes.append((a, b, c, d, xx, yy, rng))
+
+        self.finished.emit(planes, self.solution)
+
+
+class Graph3DWidget(QWidget):
+    """Widget 3D sin lag: el cálculo pesado ocurre en un QThread."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(360)
+        self._thread = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.fig = Figure(figsize=(5, 4), dpi=90, facecolor='#12121f')
+        self.canvas = FigureCanvas(self.fig)
+        self.canvas.setStyleSheet("background:#12121f; border-radius:12px;")
+        layout.addWidget(self.canvas)
+
+        self._placeholder()
+
+    def _placeholder(self):
+        self.fig.clear()
+        ax = self.fig.add_subplot(111, facecolor='#12121f')
+        ax.text(0.5, 0.5,
+                "La gráfica 3D aparecerá\naquí tras resolver el sistema",
+                ha='center', va='center', fontsize=13,
+                color='#585b70', transform=ax.transAxes)
+        ax.axis('off')
+        self.canvas.draw_idle()
+
+    def plot(self, matrix, solution=None):
+        """Inicia el render en un hilo separado para no congelar la UI."""
+        # Cancelar hilo anterior si aún corre
+        if self._thread and self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait()
+
+        self._thread = QThread()
+        self._worker = _RenderWorker(matrix, solution)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._on_data_ready)
+        self._worker.finished.connect(self._thread.quit)
+        self._thread.start()
+
+    def _on_data_ready(self, planes, solution):
+        """Dibuja en el hilo principal una vez que los datos están listos."""
+        self.fig.clear()
+        ax = self.fig.add_subplot(111, projection='3d', facecolor='#12121f')
+        self._style_axes(ax)
+
+        colors = ['#89b4fa', '#a6e3a1', '#f9e2af']
+        names  = ['Plano E1', 'Plano E2', 'Plano E3']
+
+        for (a, b, c, d, xx, yy, rng), color, name in zip(planes, colors, names):
+            try:
+                if abs(c) > 1e-10:
+                    zz = (d - a*xx - b*yy) / c
+                    zz = np.clip(zz, -rng*2, rng*2)
+                    ax.plot_surface(xx, yy, zz, alpha=0.30, color=color, edgecolor='none')
+                elif abs(b) > 1e-10:
+                    zz_r = np.linspace(-rng, rng, 18)
+                    xx2, zz2 = np.meshgrid(np.linspace(-rng, rng, 18), zz_r)
+                    yy2 = np.clip((d - a*xx2) / b, -rng*2, rng*2)
+                    ax.plot_surface(xx2, yy2, zz2, alpha=0.30, color=color, edgecolor='none')
+                elif abs(a) > 1e-10:
+                    yy3, zz3 = np.meshgrid(np.linspace(-rng, rng, 18), np.linspace(-rng, rng, 18))
+                    ax.plot_surface(np.full_like(yy3, d/a), yy3, zz3,
+                                    alpha=0.30, color=color, edgecolor='none')
+            except Exception:
+                pass
+            ax.plot([], [], [], color=color, linewidth=4, label=name)
+
+        if solution is not None:
+            sx, sy, sz = [float(v) for v in solution]
+            ax.scatter([sx], [sy], [sz], color='#f38ba8', s=200,
+                       edgecolors='#ffffff', linewidths=1.5, zorder=10,
+                       label=f'({sx:.2g}, {sy:.2g}, {sz:.2g})')
+            for axis, vals in [('x', ([sx,sx],[sy,sy],[-4,4])),
+                                ('y', ([sx,sx],[-4,4],[sz,sz])),
+                                ('z', ([-4,4],[sy,sy],[sz,sz]))]:
+                ax.plot(*vals, color='#f38ba8', alpha=0.25, linewidth=1, linestyle='--')
+
+        ax.legend(loc='upper left', fontsize=9, framealpha=0.25,
+                  facecolor='#1e1e30', edgecolor='#3a3a55', labelcolor='#cdd6f4')
+        self.canvas.draw_idle()
+
+    def _style_axes(self, ax):
+        ax.set_xlabel('x', color='#89b4fa', fontsize=10, labelpad=6)
+        ax.set_ylabel('y', color='#a6e3a1', fontsize=10, labelpad=6)
+        ax.set_zlabel('z', color='#f9e2af', fontsize=10, labelpad=6)
+        for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+            pane.fill = False
+            pane.set_edgecolor('#2a2a40')
+        ax.tick_params(colors='#585b70', labelsize=7)
+        for line in (ax.xaxis.line, ax.yaxis.line, ax.zaxis.line):
+            line.set_color('#2a2a40')
+        ax.grid(True, color='#2a2a40', linewidth=0.4, linestyle=':')
+        self.fig.patch.set_facecolor('#12121f')
+
+================================================================================
+ARCHIVO: requirements.txt
+================================================================================
+PySide6==6.8.2.1
+QtAwesome==1.4.1
+matplotlib>=3.8.0
+numpy>=1.26.0
