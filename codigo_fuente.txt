@@ -1,6 +1,7 @@
 ================================================================================
 GAUSS-JORDAN MASTER PRO - CODIGO FUENTE COMPLETO
-Analisis Numerico - Ingenieria de Sistemas
+Analisis Numerico - Ingenieria de Sistema
+Diego Robles ---191980
 Universidad Francisco de Paula Santander Ocana
 ================================================================================
 
