@@ -46,6 +46,9 @@ def _preprocess(eq_str):
     # Eliminar asterisco multiplicador: 2*x → 2x
     s = s.replace('*', '')
 
+    # Simplificar dobles signos: --y → +y, +-y → -y, -+y → -y, ++y → +y
+    s = s.replace('--', '+').replace('++', '+').replace('+-', '-').replace('-+', '-')
+
     return s
 
 
@@ -78,6 +81,10 @@ def parse_equation(eq_str):
     left_side = _preprocess(raw_left)
     right_side = _preprocess(raw_right)
 
+    # BUG 2: ecuación completamente vacía (solo "=" o "  =  ")
+    if not left_side and not right_side:
+        raise ValueError("La ecuación está vacía.")
+
     # Parsear el RHS (término independiente)
     try:
         rhs = parse_fraction(right_side) if right_side else Fraction(0)
@@ -86,6 +93,7 @@ def parse_equation(eq_str):
 
     # Diccionario de coeficientes
     coeffs = {'x': Fraction(0), 'y': Fraction(0), 'z': Fraction(0)}
+    found_variable = False  # para detectar ecuaciones sin variables (BUG 1)
 
     # Patrón ampliado:
     #   Grupo 1: signo opcional  [+-]
@@ -103,6 +111,19 @@ def parse_equation(eq_str):
         match = pattern.match(left_side, pos)
         if not match:
             bad_char = left_side[pos]
+            # BUG 4: signo seguido de variable no soportada (ej: "+w")
+            if bad_char in '+-' and pos + 1 < len(left_side) and left_side[pos + 1].isalpha():
+                unknown_var = left_side[pos + 1]
+                raise ValueError(
+                    f"Variable '{unknown_var}' no reconocida. "
+                    f"Solo se aceptan las variables x, y, z."
+                )
+            # BUG 4: variable no soportada directa (ej: "w")
+            if bad_char.isalpha():
+                raise ValueError(
+                    f"Variable '{bad_char}' no reconocida. "
+                    f"Solo se aceptan las variables x, y, z."
+                )
             raise ValueError(
                 f"No se puede interpretar el carácter '{bad_char}' "
                 f"en la posición {pos} de '{left_side}'.\n"
@@ -130,12 +151,29 @@ def parse_equation(eq_str):
         if sign == '-':
             val = -val
 
+        # BUG 3: detectar "2xy" — variable pegada a otra variable sin operador
+        if var and (pos + len(full_term)) < len(left_side):
+            next_char = left_side[pos + len(full_term)]
+            if next_char in 'xyz':
+                raise ValueError(
+                    f"Formato inválido '{full_term}{next_char}': dos variables pegadas. "
+                    f"Use un operador entre ellas, por ejemplo: '{full_term} + {next_char}'"
+                )
+
         if var:
+            found_variable = True
             coeffs[var] += val
         else:
             # Constante en el LHS → pasar al RHS con signo contrario
             rhs -= val
 
         pos += len(full_term)
+
+    # BUG 1: ecuación sin ninguna variable (ej: "3 + 5 = 8" o "= 5")
+    if not found_variable and left_side:
+        raise ValueError(
+            "La ecuación no contiene variables (x, y, z). "
+            "Ingrese una ecuación lineal válida, por ejemplo: '2x + y - z = 5'"
+        )
 
     return [coeffs['x'], coeffs['y'], coeffs['z'], rhs]

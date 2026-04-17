@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QMessageBox, QCheckBox,
     QGroupBox, QLineEdit, QFrame, QDialog,
-    QTextBrowser, QSizePolicy
+    QTextBrowser, QSizePolicy, QApplication
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -21,17 +21,29 @@ EXAMPLES = [
     {
         "label": "Ejemplo 1",
         "color": "#a6e3a1", "dark": "#1a2a1a",
-        "tooltip": "Solucion unica: x=2, y=3, z=-1",
+        "tooltip": "Solución única: x=2, y=3, z=-1",
         "eqs": ["2x + y - z = 8", "-3x - y + 2z = -11", "-2x + y + 2z = -3"],
     },
     {
         "label": "Ejemplo 2",
         "color": "#a6e3a1", "dark": "#1a2a1a",
-        "tooltip": "Solucion unica: x=1, y=-1, z=2",
+        "tooltip": "Solución única: x=1, y=-1, z=2",
         "eqs": ["x - 2y + 3z = 9", "-x + 3y = -4", "2x - 5y + 5z = 17"],
     },
     {
-        "label": "Sin Solucion",
+        "label": "Fracciones",
+        "color": "#a6e3a1", "dark": "#1a2a1a",
+        "tooltip": "Solución única con coeficientes fraccionarios",
+        "eqs": ["(1/2)x + y - z = 1", "x - (1/3)y + z = 2", "2x + y + (1/4)z = 5"],
+    },
+    {
+        "label": "Homogéneo",
+        "color": "#a6e3a1", "dark": "#1a2a1a",
+        "tooltip": "Sistema homogéneo: x=y=z=0",
+        "eqs": ["x + y + z = 0", "2x - y + z = 0", "x + 2y - z = 0"],
+    },
+    {
+        "label": "Sin Solución",
         "color": "#f38ba8", "dark": "#2a1a1a",
         "tooltip": "Sistema inconsistente",
         "eqs": ["x + y + z = 6", "2x + 2y + 2z = 14", "3x + 3y + 3z = 20"],
@@ -362,6 +374,7 @@ class MainWindow(QMainWindow):
         self.resize(1100, 820)
         self.setMinimumSize(900, 650)
         self.setStyleSheet(MAIN_STYLE)
+        self._last_result = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -427,11 +440,11 @@ class MainWindow(QMainWindow):
         left.addWidget(eq_group)
 
         # Ejemplos rapidos
-        ex_group = QGroupBox("EJEMPLOS RAPIDOS")
+        ex_group = QGroupBox("EJEMPLOS RÁPIDOS")
         ex_lay = QVBoxLayout(ex_group)
         ex_lay.setContentsMargins(12, 30, 12, 12)
         ex_lay.setSpacing(6)
-        row1, row2 = QHBoxLayout(), QHBoxLayout()
+        rows_ex = [QHBoxLayout(), QHBoxLayout(), QHBoxLayout()]
         for idx, ex in enumerate(EXAMPLES):
             btn = QPushButton(ex["label"])
             btn.setToolTip(ex["tooltip"])
@@ -445,9 +458,9 @@ class MainWindow(QMainWindow):
                 f"QPushButton:pressed{{background:{c}50;}}"
             )
             btn.clicked.connect(lambda _, e=ex: self._load_example(e))
-            (row1 if idx < 2 else row2).addWidget(btn)
-        ex_lay.addLayout(row1)
-        ex_lay.addLayout(row2)
+            rows_ex[idx // 2].addWidget(btn)
+        for r in rows_ex:
+            ex_lay.addLayout(r)
         left.addWidget(ex_group)
 
         # Matriz
@@ -487,12 +500,34 @@ class MainWindow(QMainWindow):
         self.result_frame.setFixedHeight(58)
         self._set_banner_style("idle")
         res_lay = QHBoxLayout(self.result_frame)
-        res_lay.setContentsMargins(16, 0, 16, 0)
+        res_lay.setContentsMargins(16, 0, 8, 0)
         self.result_label = QLabel("Ingresa las ecuaciones y presiona  RESOLVER")
         self.result_label.setAlignment(Qt.AlignCenter)
         self._set_result_label_style("idle")
-        res_lay.addWidget(self.result_label)
+        res_lay.addWidget(self.result_label, stretch=1)
+        self.copy_btn = QPushButton()
+        self.copy_btn.setIcon(qta.icon("fa5s.copy", color="#89b4fa"))
+        self.copy_btn.setToolTip("Copiar resultado al portapapeles")
+        self.copy_btn.setFixedSize(36, 36)
+        self.copy_btn.setCursor(Qt.PointingHandCursor)
+        self.copy_btn.setVisible(False)
+        self.copy_btn.clicked.connect(self._copy_result)
+        res_lay.addWidget(self.copy_btn)
         right.addWidget(self.result_frame)
+
+        # Verificación de solución
+        self.verify_frame = QFrame()
+        self.verify_frame.setVisible(False)
+        self.verify_frame.setStyleSheet(
+            "QFrame{background:#12122a;border:1px solid #313244;border-radius:10px;}"
+        )
+        verify_lay = QHBoxLayout(self.verify_frame)
+        verify_lay.setContentsMargins(14, 8, 14, 8)
+        self.verify_label = QLabel()
+        self.verify_label.setWordWrap(True)
+        self.verify_label.setStyleSheet("color:#a6adc8;font-size:12px;border:none;")
+        verify_lay.addWidget(self.verify_label)
+        right.addWidget(self.verify_frame)
 
     # ── Helpers de estilo ────────────────────────────────────────────────────
     def _set_banner_style(self, mode):
@@ -585,21 +620,51 @@ class MainWindow(QMainWindow):
             solver = GaussJordanSolver(data)
             status, res = solver.solve()
             self.step_viewer.set_steps(solver.steps)
+            self._last_result = None
+            self.copy_btn.setVisible(False)
+            self.verify_frame.setVisible(False)
 
-            if status == "Solucion unica":
+            if status == "Solución única":
                 x, y, z = res
                 fmt = lambda v: str(v) if self.check_fraction.isChecked() else f"{float(v):.4f}"
                 self.result_label.setText(
-                    f"SOLUCION UNICA:  x = {fmt(x)}   |   y = {fmt(y)}   |   z = {fmt(z)}")
+                    f"SOLUCIÓN ÚNICA:  x = {fmt(x)}   |   y = {fmt(y)}   |   z = {fmt(z)}")
                 self._set_banner_style("ok"); self._set_result_label_style("ok")
-            elif status == "No tiene solucion":
-                self.result_label.setText("SIN SOLUCION — Sistema inconsistente (0 = c != 0)")
+                self._last_result = (x, y, z)
+                self.copy_btn.setVisible(True)
+                self._show_verification(data, x, y, z)
+            elif status == "No tiene solución":
+                self.result_label.setText("SIN SOLUCIÓN — Sistema inconsistente (0 = c ≠ 0)")
                 self._set_banner_style("error"); self._set_result_label_style("error")
             else:
                 self.result_label.setText("INFINITAS SOLUCIONES — Sistema indeterminado")
                 self._set_banner_style("inf"); self._set_result_label_style("inf")
         except Exception as e:
-            QMessageBox.critical(self, "Error de calculo", str(e))
+            QMessageBox.critical(self, "Error de cálculo", str(e))
+
+    def _show_verification(self, data, x, y, z):
+        lines = []
+        ok = True
+        for i, row in enumerate(data):
+            a, b, c, rhs = row
+            lhs = a * x + b * y + c * z
+            check = "✓" if lhs == rhs else "✗"
+            if lhs != rhs:
+                ok = False
+            fmt = lambda v: str(v) if self.check_fraction.isChecked() else f"{float(v):.4f}"
+            lines.append(f"E{i+1}: {fmt(lhs)} = {fmt(rhs)}  {check}")
+        icon = "✓ Verificación correcta" if ok else "✗ Error en verificación"
+        self.verify_label.setText(f"<b>{icon}</b>   " + "   ".join(lines))
+        self.verify_frame.setVisible(True)
+
+    def _copy_result(self):
+        if not self._last_result:
+            return
+        x, y, z = self._last_result
+        fmt = lambda v: str(v) if self.check_fraction.isChecked() else f"{float(v):.4f}"
+        text = f"x = {fmt(x)}, y = {fmt(y)}, z = {fmt(z)}"
+        QApplication.clipboard().setText(text)
+        self.copy_btn.setToolTip("¡Copiado!")
 
     def _toggle_output_format(self):
         self.step_viewer.toggle_format(self.check_fraction.isChecked())
@@ -615,6 +680,10 @@ class MainWindow(QMainWindow):
         self.step_viewer.set_steps([])
         self.result_label.setText("Ingresa las ecuaciones y presiona  RESOLVER")
         self._set_banner_style("idle"); self._set_result_label_style("idle")
+        self._last_result = None
+        self.copy_btn.setVisible(False)
+        self.copy_btn.setToolTip("Copiar resultado al portapapeles")
+        self.verify_frame.setVisible(False)
 
     def _show_help(self):
         HelpDialog(self).exec()
